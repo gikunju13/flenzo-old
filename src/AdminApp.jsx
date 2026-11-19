@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { supabase } from "./lib/supabase.js";
+import { supabase, supabaseConfigured } from "./lib/supabase.js";
 import ProductImagePicker from "./ProductImagePicker.jsx";
 import { uploadStoryImage, removeStoryImage } from "./lib/storyImages.js";
 import {
@@ -7,6 +7,7 @@ import {
   gallerySignature,
   photosFromProduct,
   removeUploadedFiles,
+  resolveImageSrc,
   uploadGallery,
   validatePhotos,
 } from "./lib/productImages.js";
@@ -260,13 +261,14 @@ function HomepageLivePreview({ section }) {
   );
 }
 
-export default function AdminApp() {
+function AdminAppInner() {
   const [status, setStatus] = useState("checking");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [adminEmail, setAdminEmail] = useState("");
+  const [adminRole, setAdminRole] = useState("");
   const [recoveryMode, setRecoveryMode] = useState(false);
   const [recoverySent, setRecoverySent] = useState(false);
   const [newPassword, setNewPassword] = useState("");
@@ -276,10 +278,18 @@ export default function AdminApp() {
 
   const [showStories, setShowStories] = useState(false);
   const [showHomepage, setShowHomepage] = useState(false);
+  const [showCategories, setShowCategories] = useState(false);
   const [homepageSections, setHomepageSections] = useState([]);
   const [homepageLoading, setHomepageLoading] = useState(false);
   const [homepageError, setHomepageError] = useState("");
   const [homepageNotice, setHomepageNotice] = useState("");
+
+  // Owner-only newsletter subscriber management.
+  const [newsletterSubscribers, setNewsletterSubscribers] = useState([]);
+  const [newsletterLoading, setNewsletterLoading] = useState(false);
+  const [newsletterError, setNewsletterError] = useState("");
+  const [newsletterSearch, setNewsletterSearch] = useState("");
+  const [newsletterDeletingId, setNewsletterDeletingId] = useState(null);
   const [floatingNotification, setFloatingNotification] = useState(null);
 
   useEffect(() => {
@@ -317,9 +327,17 @@ export default function AdminApp() {
   const [productsLoading, setProductsLoading] = useState(false);
   const [productsError, setProductsError] = useState("");
   const [adminCategories, setAdminCategories] = useState([]);
+  const [categoriesLoading, setCategoriesLoading] = useState(false);
+  const [categoriesError, setCategoriesError] = useState("");
+  const [categoryName, setCategoryName] = useState("");
+  const [categorySaving, setCategorySaving] = useState(false);
+  const [editingCategoryId, setEditingCategoryId] = useState(null);
+  const [editingCategoryName, setEditingCategoryName] = useState("");
+  const [categoryActionBusyId, setCategoryActionBusyId] = useState(null);
   const [editingProductId, setEditingProductId] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [editSaving, setEditSaving] = useState(false);
+  const [deletingProductId, setDeletingProductId] = useState(null);
   const [editError, setEditError] = useState("");
   const [editNotice, setEditNotice] = useState("");
   const [showCreateProduct, setShowCreateProduct] = useState(false);
@@ -349,15 +367,17 @@ export default function AdminApp() {
     if (!user) {
       setStatus("signedOut");
       setAdminEmail("");
+      setAdminRole("");
       return;
     }
 
     setStatus("checking");
     setError("");
+    setAdminRole("");
 
     const { data, error: queryError } = await supabase
       .from("admin_users")
-      .select("user_id")
+      .select("user_id, role")
       .eq("user_id", user.id)
       .maybeSingle();
 
@@ -367,13 +387,24 @@ export default function AdminApp() {
       return;
     }
 
-    if (!data) {
-      setStatus("denied");
+    if (!data || !["owner", "client"].includes(data.role)) {
+      setAdminRole("");
       setAdminEmail(user.email || "");
+      setStatus("denied");
       return;
     }
 
     setAdminEmail(user.email || "");
+    setAdminRole(data.role);
+
+    if (data.role === "client") {
+      setActiveStudioSection("products");
+      setShowProducts(true);
+      setShowCategories(false);
+      setShowStories(false);
+      setShowHomepage(false);
+    }
+
     setStatus("admin");
   }
 
@@ -403,6 +434,230 @@ export default function AdminApp() {
       );
     } finally {
       setProductsLoading(false);
+    }
+  }
+
+  function makeCategorySlug(value) {
+    return value
+      .normalize("NFKD")
+      .replace(/[\\u0300-\\u036f]/g, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  }
+
+  async function loadAdminCategories() {
+    setCategoriesLoading(true);
+    setCategoriesError("");
+
+    try {
+      const { data, error: queryError } = await supabase
+        .from("categories")
+        .select("id, name, slug, sort_order, active")
+        .order("sort_order", { ascending: true });
+
+      if (queryError) throw queryError;
+      setAdminCategories(data || []);
+    } catch (err) {
+      setCategoriesError(err.message || "Could not load categories.");
+    } finally {
+      setCategoriesLoading(false);
+    }
+  }
+
+  async function createCategory(event) {
+    event.preventDefault();
+    setCategoriesError("");
+
+    const name = categoryName.trim();
+    if (!name) {
+      setCategoriesError("Enter a category name.");
+      return;
+    }
+
+    if (adminCategories.some(
+      (category) => category.name.trim().toLowerCase() === name.toLowerCase()
+    )) {
+      setCategoriesError("A category with this name already exists.");
+      return;
+    }
+
+    const baseSlug = makeCategorySlug(name);
+    if (!baseSlug) {
+      setCategoriesError("This name cannot be used to create a category URL.");
+      return;
+    }
+
+    const slugExists = adminCategories.some((category) => category.slug === baseSlug);
+    const slug = slugExists ? `${baseSlug}-${Date.now().toString(36)}` : baseSlug;
+    const nextOrder = adminCategories.reduce(
+      (maximum, category) => Math.max(maximum, Number(category.sort_order) || 0),
+      0
+    ) + 1;
+
+    setCategorySaving(true);
+    try {
+      const { data, error: insertError } = await supabase
+        .from("categories")
+        .insert({ name, slug, sort_order: nextOrder, active: true })
+        .select("id, name, slug, sort_order, active")
+        .single();
+
+      if (insertError) throw insertError;
+
+      setAdminCategories((current) => [...current, data]);
+      setCategoryName("");
+      setFloatingNotification({
+        type: "success",
+        message: `Category "${data.name}" created.`,
+      });
+    } catch (err) {
+      setCategoriesError(err.message || "Could not create this category.");
+    } finally {
+      setCategorySaving(false);
+    }
+  }
+
+  async function saveCategoryName(categoryId) {
+    setCategoriesError("");
+
+    const name = editingCategoryName.trim();
+    if (!name) {
+      setCategoriesError("Category name cannot be empty.");
+      return;
+    }
+
+    const original = adminCategories.find((category) => category.id === categoryId);
+    if (!original) {
+      setCategoriesError("Category not found. Reload the categories.");
+      return;
+    }
+
+    if (adminCategories.some(
+      (category) =>
+        category.id !== categoryId &&
+        category.name.trim().toLowerCase() === name.toLowerCase()
+    )) {
+      setCategoriesError("A category with this name already exists.");
+      return;
+    }
+
+    const baseSlug = makeCategorySlug(name);
+    if (!baseSlug) {
+      setCategoriesError("This name cannot be used to create a category URL.");
+      return;
+    }
+
+    const slugExists = adminCategories.some(
+      (category) => category.id !== categoryId && category.slug === baseSlug
+    );
+    const slug = name === original.name
+      ? original.slug
+      : slugExists
+        ? `${baseSlug}-${Date.now().toString(36)}`
+        : baseSlug;
+
+    setCategoryActionBusyId(categoryId);
+    try {
+      const { data, error: updateError } = await supabase
+        .from("categories")
+        .update({ name, slug, updated_at: new Date().toISOString() })
+        .eq("id", categoryId)
+        .select("id, name, slug, sort_order, active")
+        .single();
+
+      if (updateError) throw updateError;
+
+      setAdminCategories((current) =>
+        current.map((category) => category.id === categoryId ? data : category)
+      );
+      setEditingCategoryId(null);
+      setEditingCategoryName("");
+      setFloatingNotification({
+        type: "success",
+        message: `Category renamed to "${data.name}".`,
+      });
+    } catch (err) {
+      setCategoriesError(err.message || "Could not rename this category.");
+    } finally {
+      setCategoryActionBusyId(null);
+    }
+  }
+
+  async function moveCategory(categoryId, direction) {
+    setCategoriesError("");
+
+    const ordered = [...adminCategories].sort(
+      (a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0)
+    );
+    const currentIndex = ordered.findIndex((item) => item.id === categoryId);
+    const targetIndex = currentIndex + direction;
+
+    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= ordered.length) {
+      return;
+    }
+
+    [ordered[currentIndex], ordered[targetIndex]] = [
+      ordered[targetIndex],
+      ordered[currentIndex],
+    ];
+
+    setCategoryActionBusyId(categoryId);
+    try {
+      const updates = await Promise.all(
+        ordered.map((category, index) =>
+          supabase
+            .from("categories")
+            .update({
+              sort_order: index + 1,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", category.id)
+        )
+      );
+
+      const failedUpdate = updates.find((result) => result.error);
+      if (failedUpdate) throw failedUpdate.error;
+
+      setAdminCategories(
+        ordered.map((category, index) => ({ ...category, sort_order: index + 1 }))
+      );
+    } catch (err) {
+      setCategoriesError(err.message || "Could not reorder categories. Reload and try again.");
+      await loadAdminCategories();
+    } finally {
+      setCategoryActionBusyId(null);
+    }
+  }
+
+  async function toggleCategory(category) {
+    setCategoriesError("");
+    setCategoryActionBusyId(category.id);
+
+    try {
+      const { data, error: updateError } = await supabase
+        .from("categories")
+        .update({
+          active: !category.active,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", category.id)
+        .select("id, name, slug, sort_order, active")
+        .single();
+
+      if (updateError) throw updateError;
+
+      setAdminCategories((current) =>
+        current.map((item) => item.id === category.id ? data : item)
+      );
+      setFloatingNotification({
+        type: "success",
+        message: `Category "${data.name}" ${data.active ? "activated" : "deactivated"}.`,
+      });
+    } catch (err) {
+      setCategoriesError(err.message || "Could not update this category.");
+    } finally {
+      setCategoryActionBusyId(null);
     }
   }
 
@@ -451,6 +706,97 @@ export default function AdminApp() {
     } finally {
       setHomepageLoading(false);
     }
+  }
+
+  async function loadNewsletterSubscribers() {
+    if (adminRole !== "owner") return;
+
+    setNewsletterLoading(true);
+    setNewsletterError("");
+
+    try {
+      const { data, error: queryError } = await supabase
+        .from("newsletter_subscribers")
+        .select("id, email, consent, subscribed_at")
+        .order("subscribed_at", { ascending: false });
+
+      if (queryError) throw queryError;
+
+      setNewsletterSubscribers(data || []);
+    } catch (err) {
+      console.error("Newsletter subscribers could not be loaded:", err);
+      setNewsletterError(
+        err.message || "Could not load newsletter subscribers. Please try again."
+      );
+    } finally {
+      setNewsletterLoading(false);
+    }
+  }
+
+  async function deleteNewsletterSubscriber(subscriber) {
+    if (adminRole !== "owner" || newsletterDeletingId) return;
+
+    const confirmed = window.confirm(
+      `Remove ${subscriber.email} from the newsletter list? This cannot be undone.`
+    );
+
+    if (!confirmed) return;
+
+    setNewsletterDeletingId(subscriber.id);
+    setNewsletterError("");
+
+    try {
+      const { error: deleteError } = await supabase
+        .from("newsletter_subscribers")
+        .delete()
+        .eq("id", subscriber.id);
+
+      if (deleteError) throw deleteError;
+
+      setNewsletterSubscribers((current) =>
+        current.filter((item) => item.id !== subscriber.id)
+      );
+    } catch (err) {
+      console.error("Newsletter subscriber could not be deleted:", err);
+      setNewsletterError(
+        err.message || "Could not remove this subscriber. Please try again."
+      );
+    } finally {
+      setNewsletterDeletingId(null);
+    }
+  }
+
+  function exportNewsletterSubscribers() {
+    if (adminRole !== "owner" || newsletterSubscribers.length === 0) return;
+
+    const escapeCsv = (value) =>
+      `"${String(value ?? "").replace(/"/g, '""')}"`;
+
+    const rows = [
+      ["Email", "Consent", "Subscribed at"],
+      ...newsletterSubscribers.map((subscriber) => [
+        subscriber.email,
+        subscriber.consent ? "Yes" : "No",
+        subscriber.subscribed_at
+          ? new Date(subscriber.subscribed_at).toISOString()
+          : "",
+      ]),
+    ];
+
+    const csv = "\uFEFF" + rows.map((row) =>
+      row.map(escapeCsv).join(",")
+    ).join("\r\n");
+
+    const file = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = window.URL.createObjectURL(file);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = `flenzo-newsletter-subscribers-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
   }
 
   async function saveHomepageSection(sectionId) {
@@ -748,6 +1094,50 @@ export default function AdminApp() {
     }
   }, [status, showProducts]);
 
+  async function deleteProduct(product) {
+    if (deletingProductId) return;
+
+    const confirmed = window.confirm(
+      `Delete "${product.name || "Unnamed product"}"? This removes the product record and cannot be undone. Uploaded images will be kept.`
+    );
+
+    if (!confirmed) return;
+
+    setDeletingProductId(product.id);
+
+    try {
+      const { error: deleteError } = await supabase
+        .from("products")
+        .delete()
+        .eq("id", product.id);
+
+      if (deleteError) throw deleteError;
+
+      setAdminProducts((current) =>
+        current.filter((item) => item.id !== product.id)
+      );
+
+      if (editingProductId === product.id) {
+        setEditingProductId(null);
+        setEditForm({});
+        setEditPhotos([]);
+        setEditError("");
+      }
+
+      setFloatingNotification({
+        type: "success",
+        message: `Product "${product.name || "Unnamed product"}" deleted.`,
+      });
+    } catch (err) {
+      setFloatingNotification({
+        type: "error",
+        message: err.message || "Could not delete this product. Please try again.",
+      });
+    } finally {
+      setDeletingProductId(null);
+    }
+  }
+
   function startEditingProduct(product) {
     setEditPhotos(photosFromProduct(product));
     setEditingProductId(product.id);
@@ -899,6 +1289,13 @@ export default function AdminApp() {
       return;
     }
 
+    if (!createForm.category_id || !adminCategories.some(
+      (category) => category.id === createForm.category_id && category.active
+    )) {
+      setCreateError("Choose an active product category.");
+      return;
+    }
+
     if (priceText === "" || !Number.isFinite(price) || price < 0) {
       setCreateError("Enter a valid, non-negative selling price.");
       return;
@@ -936,7 +1333,7 @@ export default function AdminApp() {
       description: createForm.description.trim(),
       price,
       old_price: oldPrice,
-      category_id: createForm.category_id || null,
+      category_id: createForm.category_id,
       sizes: splitList(createForm.sizes),
       colors: splitList(createForm.colors),
       active: Boolean(createForm.active),
@@ -1000,6 +1397,11 @@ export default function AdminApp() {
       if (active && event === "PASSWORD_RECOVERY") {
         setError("");
         setStatus("resetPassword");
+      }
+
+      if (active && event === "SIGNED_OUT") {
+        setAdminEmail("");
+        setStatus("signedOut");
       }
     });
 
@@ -1319,32 +1721,68 @@ export default function AdminApp() {
           )}
             <nav className="admin-studio-nav" aria-label="Studio navigation">
               <p className="admin-studio-nav-label">STUDIO</p>
-              <button type="button" className={activeStudioSection === "overview" ? "is-active" : ""} onClick={() => {
+              {adminRole === "owner" && (
+                <button type="button" className={activeStudioSection === "overview" ? "is-active" : ""} onClick={() => {
                 setActiveStudioSection("overview");
+                setShowCategories(false);
                 setShowProducts(false);
                 setShowStories(false);
                 setShowHomepage(false);
               }}><span aria-hidden="true">⌂</span> Overview</button>
+              )}
               <button type="button" className={activeStudioSection === "products" ? "is-active" : ""} onClick={() => {
                 setActiveStudioSection("products");
+                setShowCategories(false);
                 setShowProducts(true);
                 setShowStories(false);
                 setShowHomepage(false);
               }}><span aria-hidden="true">▦</span> Products</button>
-              <button type="button" className={activeStudioSection === "stories" ? "is-active" : ""} onClick={() => {
+              <button type="button" className={activeStudioSection === "categories" ? "is-active" : ""} onClick={() => {
+                setActiveStudioSection("categories");
+                setShowProducts(false);
+                setShowCategories(true);
+                setShowStories(false);
+                setShowHomepage(false);
+                loadAdminCategories();
+              }}><span aria-hidden="true">▧</span> Categories</button>
+              {adminRole === "owner" && (
+                <button type="button" className={activeStudioSection === "stories" ? "is-active" : ""} onClick={() => {
                 setActiveStudioSection("stories");
+                setShowCategories(false);
                 setShowProducts(false);
                 setShowStories(true);
                 setShowHomepage(false);
                 loadAdminStories();
               }}><span aria-hidden="true">▤</span> Stories</button>
+              )}
+              {adminRole === "owner" && (
               <button type="button" className={activeStudioSection === "homepage" ? "is-active" : ""} onClick={() => {
                 setActiveStudioSection("homepage");
+                setShowCategories(false);
                 setShowProducts(false);
                 setShowStories(false);
                 setShowHomepage(true);
                 loadAdminHomepage();
               }}><span aria-hidden="true">▧</span> Homepage</button>
+              )}
+              {adminRole === "owner" && (
+                <button
+                  type="button"
+                  className={activeStudioSection === "newsletter" ? "is-active" : ""}
+                  onClick={() => {
+                    setActiveStudioSection("newsletter");
+                    setShowCategories(false);
+                    setShowProducts(false);
+                    setShowStories(false);
+                    setShowHomepage(false);
+                    loadNewsletterSubscribers();
+                  }}
+                >
+                  <span aria-hidden="true">✉</span> Newsletter
+                </button>
+              )}
+              {adminRole === "owner" && (
+                <>
               <div className="admin-studio-nav-divider"></div>
               <p className="admin-studio-nav-label">PLANNED</p>
               <span className="admin-studio-nav-planned">Pages</span>
@@ -1352,9 +1790,11 @@ export default function AdminApp() {
               <span className="admin-studio-nav-planned">Design system</span>
               <span className="admin-studio-nav-planned">SEO &amp; discovery</span>
               <span className="admin-studio-nav-planned">Settings</span>
+                </>
+              )}
             </nav>
 
-            {activeStudioSection === "overview" && (
+            {adminRole === "owner" && activeStudioSection === "overview" && (
               <>
             <p className="admin-eyebrow">PRIVATE WORKSPACE</p>
             <h1>Flenzo CMS</h1>
@@ -1451,8 +1891,9 @@ export default function AdminApp() {
                       id="create-category"
                       value={createForm.category_id}
                       onChange={(event) => setCreateForm((current) => ({ ...current, category_id: event.target.value }))}
+                      required
                     >
-                      <option value="">No category</option>
+                      <option value="" disabled>Select a category</option>
                       {adminCategories.filter((category) => category.active).map((category) => (
                         <option key={category.id} value={category.id}>{category.name}</option>
                       ))}
@@ -1551,13 +1992,7 @@ export default function AdminApp() {
                                   ? firstImage
                                   : firstImage?.src || product.image_url || "";
 
-                                let imageUrl = imagePath;
-                                if (imagePath && !/^https?:\/\//i.test(imagePath)) {
-                                  const filename = imagePath.split("/").filter(Boolean).pop();
-                                  imageUrl = filename
-                                    ? supabase.storage.from("flenzo-images").getPublicUrl(imagePath.replace(/^\/+/, "").startsWith("products/") ? imagePath.replace(/^\/+/, "") : filename).data.publicUrl
-                                    : "";
-                                }
+                                const imageUrl = resolveImageSrc(imagePath);
 
                                 return imageUrl
                                   ? <img src={imageUrl} alt={product.name || "Product"} loading="lazy" />
@@ -1570,7 +2005,7 @@ export default function AdminApp() {
                                 KSh {Number(product.price || 0).toLocaleString()}
                               </span>
                               <small>
-                                Category: {product.category || product.category_id || "Not specified"}
+                                Category: {adminCategories.find((category) => category.id === product.category_id)?.name || product.category || "Not specified"}
                               </small>
                               <small>
                                 Status: {product.active === true ? "Active" : product.active === false ? "Inactive" : "Not specified"}
@@ -1578,13 +2013,24 @@ export default function AdminApp() {
                               <small>
                                 ID: {String(product.id)}
                               </small>
-                              <button
-                                className="admin-edit-button"
-                                type="button"
-                                onClick={() => startEditingProduct(product)}
-                              >
-                                {editingProductId === product.id ? "EDITING..." : "EDIT PRODUCT"}
-                              </button>
+                              <div className="admin-product-actions">
+                                <button
+                                  className="admin-edit-button"
+                                  type="button"
+                                  onClick={() => startEditingProduct(product)}
+                                  disabled={deletingProductId === product.id}
+                                >
+                                  {editingProductId === product.id ? "EDITING..." : "EDIT PRODUCT"}
+                                </button>
+                                <button
+                                  className="admin-product-delete"
+                                  type="button"
+                                  onClick={() => deleteProduct(product)}
+                                  disabled={Boolean(deletingProductId) || editSaving}
+                                >
+                                  {deletingProductId === product.id ? "DELETING..." : "DELETE PRODUCT"}
+                                </button>
+                              </div>
                             </div>
                           </article>
 
@@ -1731,7 +2177,163 @@ export default function AdminApp() {
               </section>
             )}
 
-            {showStories && (
+            {showCategories && (
+              <section className="admin-products admin-category-manager">
+                <h2>Product categories</h2>
+                <p>Organise the shop catalogue. Categories can be renamed, reordered, or temporarily deactivated.</p>
+
+                <form
+                  className="admin-category-create"
+                  onSubmit={createCategory}
+                >
+                  <label htmlFor="new-category-name">New category name</label>
+                  <div className="admin-category-create-row">
+                    <input
+                      id="new-category-name"
+                      value={categoryName}
+                      onChange={(event) => setCategoryName(event.target.value)}
+                      placeholder="e.g. Accessories"
+                      maxLength={60}
+                      required
+                      disabled={categorySaving}
+                    />
+                    <button
+                      className="admin-submit"
+                      type="submit"
+                      disabled={categorySaving}
+                    >
+                      {categorySaving ? "CREATING..." : "ADD CATEGORY"}
+                    </button>
+                  </div>
+                </form>
+
+                {categoriesError && (
+                  <p className="admin-error" role="alert">{categoriesError}</p>
+                )}
+
+                <div className="admin-category-list-heading">
+                  <h3>Existing categories</h3>
+                  <span>{adminCategories.length} total</span>
+                </div>
+
+                {categoriesLoading ? (
+                  <p>Loading categories...</p>
+                ) : adminCategories.length === 0 ? (
+                  <p>No categories yet. Create your first category above.</p>
+                ) : (
+                  <div className="admin-category-list">
+                    {[...adminCategories]
+                      .sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0))
+                      .map((category, index, orderedCategories) => {
+                        const busy = categoryActionBusyId === category.id;
+                        const editing = editingCategoryId === category.id;
+
+                        return (
+                          <div className="admin-category-row" key={category.id}>
+                            <div className="admin-category-details">
+                              {editing ? (
+                                <input
+                                  aria-label={`Rename ${category.name}`}
+                                  value={editingCategoryName}
+                                  onChange={(event) => setEditingCategoryName(event.target.value)}
+                                  maxLength={60}
+                                  disabled={busy}
+                                  autoFocus
+                                />
+                              ) : (
+                                <strong>{category.name}</strong>
+                              )}
+                              <span className="admin-category-slug">{category.slug}</span>
+                              <span className={category.active ? "admin-category-status is-active" : "admin-category-status"}>
+                                {category.active ? "ACTIVE" : "INACTIVE"}
+                              </span>
+                            </div>
+
+                            <div className="admin-category-actions">
+                              <button
+                                type="button"
+                                className="admin-edit-button"
+                                onClick={() => moveCategory(category.id, -1)}
+                                disabled={busy || categoriesLoading || index === 0}
+                                aria-label={`Move ${category.name} up`}
+                              >
+                                ↑
+                              </button>
+                              <button
+                                type="button"
+                                className="admin-edit-button"
+                                onClick={() => moveCategory(category.id, 1)}
+                                disabled={busy || categoriesLoading || index === orderedCategories.length - 1}
+                                aria-label={`Move ${category.name} down`}
+                              >
+                                ↓
+                              </button>
+
+                              {editing ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="admin-edit-button"
+                                    onClick={() => saveCategoryName(category.id)}
+                                    disabled={busy || !editingCategoryName.trim()}
+                                  >
+                                    {busy ? "SAVING..." : "SAVE"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="admin-logout"
+                                    onClick={() => {
+                                      setEditingCategoryId(null);
+                                      setEditingCategoryName("");
+                                      setCategoriesError("");
+                                    }}
+                                    disabled={busy}
+                                  >
+                                    CANCEL
+                                  </button>
+                                </>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="admin-edit-button"
+                                  onClick={() => {
+                                    setEditingCategoryId(category.id);
+                                    setEditingCategoryName(category.name);
+                                    setCategoriesError("");
+                                  }}
+                                  disabled={busy}
+                                >
+                                  RENAME
+                                </button>
+                              )}
+
+                              <button
+                                type="button"
+                                className="admin-logout"
+                                onClick={() => toggleCategory(category)}
+                                disabled={busy || editing}
+                              >
+                                {busy ? "PLEASE WAIT..." : category.active ? "DEACTIVATE" : "ACTIVATE"}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  className="admin-edit-button"
+                  onClick={loadAdminCategories}
+                  disabled={categoriesLoading}
+                >
+                  {categoriesLoading ? "REFRESHING..." : "REFRESH CATEGORIES"}
+                </button>
+              </section>
+            )}
+
+            {adminRole === "owner" && showStories && (
               <section className="admin-products">
                 <h2>Culture & community stories</h2>
                 <p>Create stories, edit their content, control publishing, and remove outdated stories.</p>
@@ -1991,7 +2593,7 @@ export default function AdminApp() {
 
 
 
-            {showHomepage && (
+            {adminRole === "owner" && showHomepage && (
               <section className="admin-homepage-editor">
                 <div className="admin-homepage-heading">
                   <div>
@@ -2075,6 +2677,108 @@ export default function AdminApp() {
               </section>
             )}
 
+            {adminRole === "owner" && activeStudioSection === "newsletter" && (
+              <section className="admin-newsletter-manager">
+                <div className="admin-newsletter-heading">
+                  <div>
+                    <h2>Newsletter subscribers</h2>
+                    <p>Manage the people who have signed up for Flenzo updates.</p>
+                  </div>
+                  <div className="admin-newsletter-actions">
+                    <button
+                      className="admin-edit-button"
+                      type="button"
+                      onClick={loadNewsletterSubscribers}
+                      disabled={newsletterLoading}
+                    >
+                      {newsletterLoading ? "LOADING..." : "RELOAD"}
+                    </button>
+                    <button
+                      className="admin-submit"
+                      type="button"
+                      onClick={exportNewsletterSubscribers}
+                      disabled={newsletterSubscribers.length === 0}
+                    >
+                      EXPORT CSV
+                    </button>
+                  </div>
+                </div>
+
+                <div className="admin-newsletter-count">
+                  <strong>{newsletterSubscribers.length}</strong>
+                  <span>
+                    {newsletterSubscribers.length === 1 ? "subscriber" : "subscribers"}
+                  </span>
+                </div>
+
+                <label className="admin-newsletter-search">
+                  <span>SEARCH SUBSCRIBERS</span>
+                  <input
+                    type="search"
+                    value={newsletterSearch}
+                    onChange={(event) => setNewsletterSearch(event.target.value)}
+                    placeholder="Search by email address..."
+                  />
+                </label>
+
+                {newsletterError && (
+                  <p className="admin-error" role="alert">{newsletterError}</p>
+                )}
+
+                {newsletterLoading ? (
+                  <p>Loading subscribers from Supabase...</p>
+                ) : newsletterSubscribers.length === 0 ? (
+                  <div className="admin-newsletter-empty">
+                    <h3>No subscribers yet</h3>
+                    <p>New signups from the public website will appear here.</p>
+                  </div>
+                ) : (
+                  (() => {
+                    const filteredSubscribers = newsletterSubscribers.filter((subscriber) =>
+                      subscriber.email.toLowerCase().includes(newsletterSearch.trim().toLowerCase())
+                    );
+
+                    return filteredSubscribers.length === 0 ? (
+                      <div className="admin-newsletter-empty">
+                        <p>No subscribers match that email search.</p>
+                      </div>
+                    ) : (
+                      <div className="admin-newsletter-list">
+                        {filteredSubscribers.map((subscriber) => (
+                          <article className="admin-newsletter-row" key={subscriber.id}>
+                            <div className="admin-newsletter-info">
+                              <strong>{subscriber.email}</strong>
+                              <span>
+                                Signed up: {subscriber.subscribed_at
+                                  ? new Date(subscriber.subscribed_at).toLocaleString("en-KE", {
+                                      dateStyle: "medium",
+                                      timeStyle: "short",
+                                    })
+                                  : "Date unavailable"}
+                              </span>
+                              <small>
+                                Consent: {subscriber.consent ? "Yes" : "No"}
+                              </small>
+                            </div>
+                            <button
+                              className="admin-newsletter-remove"
+                              type="button"
+                              onClick={() => deleteNewsletterSubscriber(subscriber)}
+                              disabled={newsletterDeletingId !== null}
+                            >
+                              {newsletterDeletingId === subscriber.id
+                                ? "REMOVING..."
+                                : "REMOVE"}
+                            </button>
+                          </article>
+                        ))}
+                      </div>
+                    );
+                  })()
+                )}
+              </section>
+            )}
+
             <button
               className="admin-logout"
               onClick={handleLogout}
@@ -2122,4 +2826,30 @@ export default function AdminApp() {
       <footer className="admin-footer">FLENZO CULTURE · ADMIN WORKSPACE</footer>
     </div>
   );
+}
+
+export default function AdminApp() {
+  if (!supabaseConfigured) {
+    return (
+      <div className="admin-shell">
+        <header className="admin-topbar">
+          <a className="admin-brand" href="/">FLENZO<span>.</span></a>
+          <span className="admin-topbar-label">CONTENT MANAGEMENT</span>
+          <a className="admin-back-link" href="/">View storefront ↗</a>
+        </header>
+
+        <main className="admin-main">
+          <section className="admin-panel">
+            <p className="admin-eyebrow">FLENZO CMS</p>
+            <h1>Admin temporarily unavailable</h1>
+            <p>The content service is not available right now. Please try again shortly.</p>
+          </section>
+        </main>
+
+        <footer className="admin-footer">FLENZO CULTURE · ADMIN WORKSPACE</footer>
+      </div>
+    );
+  }
+
+  return <AdminAppInner />;
 }

@@ -1,12 +1,14 @@
 import React, { useEffect, useMemo, useState } from "react";
 import heroImage from "./flenzo-assets/hero/hero-img.jpeg"
+import { supabase, supabaseConfigured } from "./lib/supabase.js";
+import { resolveImageSrc } from "./lib/productImages.js";
 /* =========================================================
    FLENZO CONTENT DATA
    Replace image URLs here with the client's real photos.
    Product cards use only images[0]. The rest appear in the
    product modal gallery when a product has more than one image.
    ========================================================= */
-const products = [
+const fallbackProducts = [
   {
     id: 3,
     name: "Flenzo Black Tee",
@@ -185,7 +187,7 @@ const products = [
   // },
 ];
 
-const categories = ["All", "T-Shirts"];
+const fallbackCategories = ["All", "T-Shirts"];
 
 // Replace these placeholder images with the client's actual South Coast photos.
 // const cultureStories = [
@@ -344,27 +346,363 @@ function Icon({ name, size = 22 }) {
   return <svg {...common}>{paths[name]}</svg>;
 }
 
+const IMAGE_PLACEHOLDER = `data:image/svg+xml;utf8,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 500"><rect width="400" height="500" fill="#f4f4f2"/><text x="200" y="255" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" letter-spacing="3" fill="#9a9a94">IMAGE UNAVAILABLE</text></svg>'
+)}`;
+
+// Shows a neutral placeholder instead of a broken-image icon when a photo is
+// missing or fails to load. Keeps the same size, so the layout never shifts.
+function SafeImage({ src, alt, ...rest }) {
+  const [failedSrc, setFailedSrc] = useState(null);
+  const failed = !src || failedSrc === src;
+  return <img {...rest} src={failed ? IMAGE_PLACEHOLDER : src} alt={alt} onError={() => setFailedSrc(src)} />;
+}
+
+function readStoredList(key) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredList(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Storage blocked or full: the cart and wishlist keep working for this visit.
+  }
+}
+
+function sanitizeWishlist(items) {
+  return items.filter((id) => typeof id === "string" || typeof id === "number");
+}
+
+function sanitizeCart(items) {
+  return items.filter((item) =>
+    item && typeof item === "object" &&
+    (typeof item.id === "string" || typeof item.id === "number") &&
+    typeof item.name === "string" &&
+    Number.isFinite(item.price) && item.price >= 0 &&
+    Number.isInteger(item.qty) && item.qty >= 1 &&
+    typeof item.size === "string" &&
+    typeof item.color === "string" &&
+    typeof item.image === "string"
+  );
+}
+
+/* Editable site content (stories and homepage text).
+   The admin saves these to Supabase. Every value falls back to the built-in
+   copy below when the database value is missing, empty or invalid, so the
+   site looks exactly as designed until content is actually edited. */
+function cleanText(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function pickText(value, fallback) {
+  return cleanText(value) || fallback;
+}
+
+function pickList(value, fallback) {
+  const items = Array.isArray(value) ? value.map(cleanText).filter(Boolean) : [];
+  return items.length ? items : fallback;
+}
+
+function pickItems(value, fields, fallback) {
+  const items = Array.isArray(value)
+    ? value
+        .filter((item) => item && typeof item === "object")
+        .map((item) => Object.fromEntries(fields.map((field) => [field, cleanText(item[field])])))
+        .filter((item) => fields.some((field) => item[field]))
+    : [];
+  return items.length ? items : fallback;
+}
+
+function resolveHomeContent(rows) {
+  const section = (key) => {
+    const content = rows?.[key];
+    return content && typeof content === "object" && !Array.isArray(content) ? content : {};
+  };
+  const hero = section("hero");
+  const culture = section("culture");
+  const community = section("community");
+  const impact = section("impact");
+  const cta = culture.cta && typeof culture.cta === "object" ? culture.cta : {};
+
+  return {
+    hero: {
+      location: pickText(hero.location, "DIANI • SOUTH COAST"),
+      titleLines: pickList(hero.titleLines, ["WEAR THE"]),
+      titleHighlight: pickText(hero.titleHighlight, "CULTURE."),
+      buttonLabel: pickText(hero.buttonLabel, "SHOP THE DROP"),
+    },
+    culture: {
+      sectionHeading: pickText(culture.sectionHeading, "THE CULTURE"),
+      eyebrow: pickText(culture.eyebrow, "FLENZO / SOUTH COAST / KENYA"),
+      titleLines: pickList(culture.titleLines, ["WHAT YOU WEAR", "CAN CONNECT YOU"]),
+      titleHighlight: pickText(culture.titleHighlight, "TO WHERE YOU LIVE."),
+      paragraphs: pickList(culture.paragraphs, [
+        "Flenzo was born on Kenya's South Coast, surrounded by movement, creativity, community and the Indian Ocean.",
+        "We make clothing inspired by that energy, bringing a piece of the coast into everyday life. From the streets of Diani to the beach and beyond, every piece is part of a culture shaped by people, place and movement.",
+      ]),
+      values: pickItems(culture.values, ["label", "text"], [
+        { label: "01 / PEOPLE", text: "The community that gives the coast its energy." },
+        { label: "02 / MOVEMENT", text: "Skate. Play. Explore. Keep moving." },
+        { label: "03 / COAST", text: "The ocean and places that inspire us." },
+      ]),
+      cta: {
+        title: pickText(cta.title, "WEAR THE PLACE. LIVE THE CULTURE."),
+        text: pickText(cta.text, "Every Flenzo purchase helps support community activities, creative spaces and coastal initiatives that keep the culture moving."),
+        buttonLabel: pickText(cta.buttonLabel, "EXPLORE THE COMMUNITY"),
+      },
+    },
+    community: {
+      sectionHeading: pickText(community.sectionHeading, "COMMUNITY"),
+      eyebrow: pickText(community.eyebrow, "PEOPLE • PLAY • COAST"),
+      titleLines: pickList(community.titleLines, ["THE CULTURE"]),
+      titleHighlight: pickText(community.titleHighlight, "IS SHARED."),
+      text: pickText(community.text, "Flenzo is built around more than clothing. It is about the people, movement and spaces that make the South Coast feel alive. From the beach to the streets, these are the moments and communities that inspire the culture."),
+      cardButtonLabel: pickText(community.cardButtonLabel, "SEE THE CONNECTION"),
+    },
+    impact: {
+      eyebrow: pickText(impact.eyebrow, "FLENZO IMPACT / SOUTH COAST"),
+      titleLines: pickList(impact.titleLines, ["WEAR SOMETHING"]),
+      titleHighlight: pickText(impact.titleHighlight, "THAT MEANS MORE."),
+      paragraphs: pickList(impact.paragraphs, [
+        "A Flenzo piece is more than something you put on. It carries the energy of the coast, the people around it, and the moments that bring us together.",
+        "When you choose Flenzo, you become part of that story. Your support helps us keep creating moments for people to move, play, connect and give back to the places we call home.",
+      ]),
+      lines: pickItems(impact.lines, ["number", "word", "text"], [
+        { number: "01", word: "MOVE.", text: "Skate. Play. Explore." },
+        { number: "02", word: "CONNECT.", text: "People. Community. Culture." },
+        { number: "03", word: "GIVE BACK.", text: "Our coast. Our home." },
+      ]),
+      note: pickText(impact.note, "The culture is alive because people show up for it."),
+      noteBold: pickText(impact.noteBold, "Thank you for being part of it."),
+    },
+  };
+}
+
+// Published stories of one type from the database, in the shape the cards use.
+function mapStoryRows(rows, type) {
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .filter((row) => row && String(row.type).toLowerCase() === type && cleanText(row.title))
+    .map((row) => ({
+      id: String(row.id),
+      label: cleanText(row.label),
+      title: cleanText(row.title),
+      text: typeof row.text === "string" ? row.text : "",
+      image: resolveImageSrc(row.image_url),
+    }));
+}
+
 function App() {
+  const [products, setProducts] = useState([]);
+  const [categories, setCategories] = useState(["All"]);
+  const [loadState, setLoadState] = useState(supabaseConfigured ? "loading" : "unavailable");
   const [category, setCategory] = useState("All");
   const [menuOpen, setMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [wishlist, setWishlist] = useState(() => JSON.parse(localStorage.getItem("flenzo-wishlist") || "[]"));
-  const [cart, setCart] = useState(() => JSON.parse(localStorage.getItem("flenzo-cart") || "[]"));
+  const [wishlist, setWishlist] = useState(() => sanitizeWishlist(readStoredList("flenzo-wishlist")));
+  const [cart, setCart] = useState(() => sanitizeCart(readStoredList("flenzo-cart")));
+  const [cartNotice, setCartNotice] = useState("");
+  // Stories: "loading" shows nothing yet, "ready" shows exactly what Supabase returned
+  // (even if that is nothing), "fallback" (request failed or Supabase unavailable) shows built-in stories.
+  const [storyRows, setStoryRows] = useState([]);
+  const [storyState, setStoryState] = useState(supabaseConfigured ? "loading" : "fallback");
+  const [homeRows, setHomeRows] = useState({});
   const [selected, setSelected] = useState(null);
   const [cartOpen, setCartOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
 
-  useEffect(() => localStorage.setItem("flenzo-wishlist", JSON.stringify(wishlist)), [wishlist]);
-  useEffect(() => localStorage.setItem("flenzo-cart", JSON.stringify(cart)), [cart]);
+  // Newsletter subscription state.
+  const [newsletterEmail, setNewsletterEmail] = useState("");
+  const [newsletterConsent, setNewsletterConsent] = useState(false);
+  const [newsletterStatus, setNewsletterStatus] = useState("");
+  const [newsletterSubmitting, setNewsletterSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!supabaseConfigured) return undefined;
+
+    let cancelled = false;
+
+    async function loadPublicProducts() {
+      const [productResult, categoryResult] = await Promise.all([
+        supabase.from("products").select("*").eq("active", true).order("created_at", { ascending: false }),
+        supabase.from("categories").select("id, name, active").eq("active", true).order("sort_order"),
+      ]);
+
+      if (cancelled) return;
+
+      if (productResult.error || categoryResult.error) {
+        console.error("Could not load shop data:", productResult.error || categoryResult.error);
+        setLoadState("error");
+        return;
+      }
+
+      const categoryNames = new Map(
+        (categoryResult.data || []).map(item => [item.id, item.name])
+      );
+
+      const publishedProducts = (productResult.data || []).map(item => {
+        const gallery = Array.isArray(item.images) ? item.images : [];
+        const images = gallery.map(entry => {
+          const src = resolveImageSrc(typeof entry === "string" ? entry : entry?.src);
+          return src ? {
+            src,
+            label: typeof entry === "object" && entry?.label
+              ? String(entry.label) : "Product photo"
+          } : null;
+        }).filter(Boolean);
+
+        if (!images.length) {
+          const fallbackSrc = resolveImageSrc(item.image_url);
+          if (fallbackSrc) images.push({ src: fallbackSrc, label: "Product photo" });
+        }
+
+        if (!images.length) {
+          images.push({ src: IMAGE_PLACEHOLDER, label: "Product photo" });
+        }
+
+        const price = Number(item.price) || 0;
+        const oldPrice = item.old_price == null ? null : Number(item.old_price);
+
+        return {
+          id: item.id,
+          name: item.name || "Unnamed product",
+          category: categoryNames.get(item.category_id) || "Uncategorised",
+          price,
+          oldPrice,
+          rating: null,
+          legacyId: item.legacy_id ?? null,
+          colors: Array.isArray(item.colors) && item.colors.length ? item.colors : ["Default"],
+          sizes: Array.isArray(item.sizes) && item.sizes.length ? item.sizes : ["One Size"],
+          images,
+          tag: oldPrice && oldPrice > price
+            ? `-${Math.round((oldPrice - price) / oldPrice * 100)}%`
+            : ""
+        };
+      });
+
+      setProducts(publishedProducts);
+
+      const names = [...new Set([
+        ...(categoryResult.data || []).map(item => item.name),
+        ...publishedProducts.map(item => item.category)
+      ].filter(Boolean))];
+
+      setCategories(["All", ...names]);
+      setLoadState("ready");
+    }
+
+    loadPublicProducts().catch(error => {
+      console.error("Could not load public products:", error);
+      if (!cancelled) setLoadState("error");
+    });
+
+    return () => { cancelled = true; };
+  }, []);
+
+  // Stories and homepage text. Independent of the shop: if this fails, the
+  // built-in copy stays in place and the shop is unaffected.
+  useEffect(() => {
+    if (!supabaseConfigured) return undefined;
+
+    let cancelled = false;
+
+    async function loadSiteContent() {
+      const [storyResult, homepageResult] = await Promise.all([
+        supabase
+          .from("stories")
+          .select("id, type, title, label, text, image_url, sort_order")
+          .eq("published", true)
+          .order("sort_order", { ascending: true }),
+        supabase.from("homepage_sections").select("section_key, content"),
+      ]);
+
+      if (cancelled) return;
+
+      if (storyResult.error) {
+        console.error("Could not load stories:", storyResult.error);
+        setStoryState("fallback");
+      } else {
+        setStoryRows(storyResult.data || []);
+        setStoryState("ready");
+      }
+
+      if (homepageResult.error) {
+        console.error("Could not load homepage content:", homepageResult.error);
+      } else {
+        setHomeRows(Object.fromEntries((homepageResult.data || []).map((row) => [row.section_key, row.content])));
+      }
+    }
+
+    loadSiteContent().catch((error) => {
+      console.error("Could not load site content:", error);
+      if (!cancelled) setStoryState("fallback");
+    });
+
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => { writeStoredList("flenzo-wishlist", wishlist); }, [wishlist]);
+  useEffect(() => { writeStoredList("flenzo-cart", cart); }, [cart]);
+
+  // Once the live catalogue has loaded, bring saved carts and wishlists in line with it:
+  // old hardcoded ids are mapped through legacy_id, prices and names are refreshed, and
+  // items that are no longer available are removed. Nothing is changed if loading failed.
+  useEffect(() => {
+    if (loadState !== "ready") return;
+
+    const byId = new Map(products.map((product) => [String(product.id), product]));
+    const byLegacyId = new Map(
+      products.filter((product) => product.legacyId != null).map((product) => [String(product.legacyId), product])
+    );
+    const findProduct = (id) => byId.get(String(id)) || byLegacyId.get(String(id)) || null;
+
+    const nextCart = [];
+    let removed = 0;
+
+    for (const item of cart) {
+      const product = findProduct(item.id);
+      if (!product || !product.sizes.includes(item.size) || !product.colors.includes(item.color)) {
+        removed += 1;
+        continue;
+      }
+      nextCart.push({ ...item, id: product.id, name: product.name, price: product.price, image: product.images[0].src });
+    }
+
+    if (JSON.stringify(nextCart) !== JSON.stringify(cart)) setCart(nextCart);
+    if (removed > 0) setCartNotice("Some items in your cart are no longer available and were removed.");
+
+    const nextWishlist = [...new Set(wishlist.map(findProduct).filter(Boolean).map((product) => product.id))];
+    if (JSON.stringify(nextWishlist) !== JSON.stringify(wishlist)) setWishlist(nextWishlist);
+  }, [loadState, products]);
 
   const filtered = useMemo(() => {
     return products.filter((product) =>
       (category === "All" || product.category === category) &&
       product.name.toLowerCase().includes(query.toLowerCase())
     );
-  }, [category, query]);
+  }, [products, category, query]);
+
+  const home = resolveHomeContent(homeRows);
+  const shownCultureStories =
+    storyState === "fallback" ? cultureStories : storyState === "ready" ? mapStoryRows(storyRows, "culture") : [];
+  const shownCommunityStories =
+    storyState === "fallback" ? communityStories : storyState === "ready" ? mapStoryRows(storyRows, "community") : [];
+  const storiesEmpty = storyState === "ready";
+
+  const shopNotice =
+    loadState === "unavailable" ? { title: "Store temporarily unavailable.", text: "Please try again shortly." } :
+    loadState === "error" ? { title: "We couldn't load the shop right now.", text: "Please check your connection and try again shortly." } :
+    loadState === "loading" ? { title: "Loading products...", text: "" } :
+    products.length === 0 ? { title: "No products available right now.", text: "New pieces are on the way. Please check back soon." } :
+    null;
 
   const cartCount = cart.reduce((sum, item) => sum + item.qty, 0);
   const cartTotal = cart.reduce((sum, item) => sum + item.price * item.qty, 0);
@@ -446,6 +784,54 @@ function App() {
     window.open(`${WHATSAPP_URL}?text=${message}`, "_blank", "noopener,noreferrer");
   }
 
+  async function handleNewsletterSubscribe(event) {
+    event.preventDefault();
+
+    const email = newsletterEmail.trim().toLowerCase();
+
+    if (!email) {
+      setNewsletterStatus("Please enter your email address.");
+      return;
+    }
+
+    if (!newsletterConsent) {
+      setNewsletterStatus("Please agree to receive Flenzo updates.");
+      return;
+    }
+
+    if (!supabaseConfigured) {
+      setNewsletterStatus("Subscriptions are temporarily unavailable. Please try again later.");
+      return;
+    }
+
+    setNewsletterSubmitting(true);
+    setNewsletterStatus("");
+
+    try {
+      const { error } = await supabase
+        .from("newsletter_subscribers")
+        .insert([{ email, consent: true }]);
+
+      if (error) {
+        if (error.code === "23505") {
+          setNewsletterStatus("You're already on the Flenzo list.");
+        } else {
+          console.error("Newsletter subscription failed:", error);
+          setNewsletterStatus("We couldn't subscribe you right now. Please try again.");
+        }
+      } else {
+        setNewsletterStatus("You're in! Watch your inbox for Flenzo updates.");
+        setNewsletterEmail("");
+        setNewsletterConsent(false);
+      }
+    } catch (error) {
+      console.error("Newsletter subscription failed:", error);
+      setNewsletterStatus("We couldn't subscribe you right now. Please try again.");
+    } finally {
+      setNewsletterSubmitting(false);
+    }
+  }
+
   return (
     <div className="app">
       <div className="announcement">FREE DELIVERY ON ORDERS OVER KSH 5,000 • DIANI / KENYA</div>
@@ -498,22 +884,31 @@ function App() {
         <section className="hero" id="home">
           <div className="hero-image" style={{ backgroundImage: `linear-gradient(90deg,rgba(0,0,0,.28),rgba(0,0,0,0) 70%),url('${heroImage}')` }}></div>
           <div className="hero-copy">
-            <p>DIANI • SOUTH COAST</p>
-            <h1>WEAR THE<br /><em>CULTURE.</em></h1>
-            <button className="dark-btn" onClick={scrollToShop}>SHOP THE DROP <Icon name="arrow" size={17} /></button>
+            <p>{home.hero.location}</p>
+            <h1>{home.hero.titleLines.map((line, index) => <React.Fragment key={index}>{line}<br /></React.Fragment>)}<em>{home.hero.titleHighlight}</em></h1>
+            <button className="dark-btn" onClick={scrollToShop}>{home.hero.buttonLabel} <Icon name="arrow" size={17} /></button>
           </div>
         </section>
 
-        <section className="category-strip">
-          {categories.map((value) => (
-            <button key={value} className={category === value ? "active" : ""} onClick={() => selectCategory(value)}>{value}</button>
-          ))}
-        </section>
+        {loadState === "ready" && products.length > 0 && (
+          <section className="category-strip">
+            {categories.map((value) => (
+              <button key={value} className={category === value ? "active" : ""} onClick={() => selectCategory(value)}>{value}</button>
+            ))}
+          </section>
+        )}
 
         <section className="section" id="shop">
           <div className="section-heading">
             <span></span><h2>{category === "All" ? "Flenzo Culture" : category}</h2><span></span>
           </div>
+
+          {shopNotice && (
+            <div className="empty store-unavailable" role="status">
+              <h3>{shopNotice.title}</h3>
+              {shopNotice.text && <p>{shopNotice.text}</p>}
+            </div>
+          )}
 
           <div className="product-grid">
             {filtered.map((product) => (
@@ -522,8 +917,8 @@ function App() {
                   className={`product-image-wrap product-${product.id}`}
                   onClick={() => setSelected(product)}
                 >
-                  <img src={product.images[0].src} alt={`${product.name} ${product.images[0].label}`} />
-                  <span className="sale">{product.tag}</span>
+                  <SafeImage src={product.images[0].src} alt={`${product.name} ${product.images[0].label}`} />
+                  {product.tag && <span className="sale">{product.tag}</span>}
                   <button
                     className={`wish ${wishlist.includes(product.id) ? "liked" : ""}`}
                     onClick={(event) => { event.stopPropagation(); toggleWishlist(product.id); }}
@@ -533,9 +928,9 @@ function App() {
                   </button>
                 </div>
                 <div className="product-info">
-                  <div className="brand-line"><span>Flenzo Culture</span><span className="rating">{product.rating} <b>★</b></span></div>
+                  <div className="brand-line"><span>Flenzo Culture</span>{product.rating != null && <span className="rating">{product.rating} <b>★</b></span>}</div>
                   <h3 onClick={() => setSelected(product)}>{product.name}</h3>
-                  <div className="price"><del>KSH {product.oldPrice.toLocaleString()}</del><strong>KSH {product.price.toLocaleString()}</strong></div>
+                  <div className="price">{product.oldPrice != null && <del>KSH {product.oldPrice.toLocaleString()}</del>}<strong>KSH {product.price.toLocaleString()}</strong></div>
                   <button className="select-btn" onClick={() => setSelected(product)}>SELECT OPTIONS <Icon name="arrow" size={15} /></button>
                 </div>
               </article>
@@ -545,70 +940,50 @@ function App() {
 
         <section className="culture-section section" id="culture">
           <div className="section-heading">
-            <span></span><h2>THE CULTURE</h2><span></span>
+            <span></span><h2>{home.culture.sectionHeading}</h2><span></span>
           </div>
           <div className="culture-intro">
-            <p className="eyebrow">FLENZO / SOUTH COAST / KENYA</p>
+            <p className="eyebrow">{home.culture.eyebrow}</p>
 
             <h2>
-              WHAT YOU WEAR<br />
-              CAN CONNECT YOU<br />
-              <em>TO WHERE YOU LIVE.</em>
+              {home.culture.titleLines.map((line, index) => <React.Fragment key={index}>{line}<br /></React.Fragment>)}
+              <em>{home.culture.titleHighlight}</em>
             </h2>
 
-            <p>
-              Flenzo was born on Kenya's South Coast, surrounded by movement,
-              creativity, community and the Indian Ocean.
-            </p>
-
-            <p>
-              We make clothing inspired by that energy, bringing a piece of the
-              coast into everyday life. From the streets of Diani to the beach
-              and beyond, every piece is part of a culture shaped by people,
-              place and movement.
-            </p>
+            {home.culture.paragraphs.map((paragraph, index) => <p key={index}>{paragraph}</p>)}
 
             <div className="culture-values">
-              <div>
-                <span className="eyebrow">01 / PEOPLE</span>
-                <p>
-                  The community that gives the coast its energy.
-                </p>
-              </div>
-
-              <div>
-                <span className="eyebrow">02 / MOVEMENT</span>
-                <p>
-                  Skate. Play. Explore. Keep moving.
-                </p>
-              </div>
-
-              <div>
-                <span className="eyebrow">03 / COAST</span>
-                <p>
-                  The ocean and places that inspire us.
-                </p>
-              </div>
+              {home.culture.values.map((item, index) => (
+                <div key={index}>
+                  <span className="eyebrow">{item.label}</span>
+                  <p>{item.text}</p>
+                </div>
+              ))}
             </div>
 
             <div className="culture-cta">
               <div>
-                <strong>WEAR THE PLACE. LIVE THE CULTURE.</strong>
+                <strong>{home.culture.cta.title}</strong>
 
-                <p className="culture-support">
-                  Every Flenzo purchase helps support community activities,
-                  creative spaces and coastal initiatives that keep the culture moving.
-                </p>
+                <p className="culture-support">{home.culture.cta.text}</p>
               </div>
 
               <button className="text-btn" onClick={() => scrollTo("community")}>
-                EXPLORE THE COMMUNITY <Icon name="arrow" size={15} />
+                {home.culture.cta.buttonLabel} <Icon name="arrow" size={15} />
               </button>
             </div>
+            {storiesEmpty && shownCultureStories.length === 0 && (
+              <div className="empty story-empty" role="status">
+                <h3>Stories coming soon.</h3>
+                <p>Check back shortly.</p>
+              </div>
+            )}
+
+            {shownCultureStories.length > 0 && (
             <div className="culture-grid">
-              {cultureStories.map((story, index) => (
+              {shownCultureStories.map((story, index) => (
                 <article className={`culture-card culture-card-${index + 1}`} key={story.id}>
-                  <div className={`culture-image ${story.id}`}><img src={story.image} alt={story.title} /></div>
+                  <div className={`culture-image ${story.id}`}><SafeImage src={story.image} alt={story.title} /></div>
                   <div className="culture-card-copy">
                     <p className="eyebrow">{story.label}</p>
                     <h3>{story.title}</h3>
@@ -617,97 +992,113 @@ function App() {
                 </article>
               ))}
             </div>
+            )}
           </div>
         </section>
 
         <section className="community-section section" id="community">
           <div className="section-heading">
-            <span></span><h2>COMMUNITY</h2><span></span>
+            <span></span><h2>{home.community.sectionHeading}</h2><span></span>
           </div>
           <div className="community-intro">
-            <p className="eyebrow">PEOPLE • PLAY • COAST</p>
-            <h2>THE CULTURE<br /><em>IS SHARED.</em></h2>
-            <p>
-              Flenzo is built around more than clothing. It is about the people,
-              movement and spaces that make the South Coast feel alive. From the
-              beach to the streets, these are the moments and communities that
-              inspire the culture.
-            </p>
+            <p className="eyebrow">{home.community.eyebrow}</p>
+            <h2>{home.community.titleLines.map((line, index) => <React.Fragment key={index}>{line}<br /></React.Fragment>)}<em>{home.community.titleHighlight}</em></h2>
+            <p>{home.community.text}</p>
           </div>
+          {storiesEmpty && shownCommunityStories.length === 0 && (
+            <div className="empty story-empty" role="status">
+              <h3>Stories coming soon.</h3>
+              <p>Check back shortly.</p>
+            </div>
+          )}
+
+          {shownCommunityStories.length > 0 && (
           <div className="community-grid">
-            {communityStories.map((story, index) => (
+            {shownCommunityStories.map((story, index) => (
               <article className={`community-card community-card-${index + 1}`} key={story.id}>
-                <div className={`community-image ${story.id}`}><img src={story.image} alt={story.title} /></div>
+                <div className={`community-image ${story.id}`}><SafeImage src={story.image} alt={story.title} /></div>
                 <div className="community-copy">
                   <p className="eyebrow">{story.label}</p>
                   <h3>{story.title}</h3>
                   <p>{story.text}</p>
-                  <button className="text-btn" onClick={() => scrollTo("impact")}>SEE THE CONNECTION <Icon name="arrow" size={15} /></button>
+                  <button className="text-btn" onClick={() => scrollTo("impact")}>{home.community.cardButtonLabel} <Icon name="arrow" size={15} /></button>
                 </div>
               </article>
             ))}
           </div>
+          )}
         </section>
 
         <section className="impact-section" id="impact">
           <div className="impact-image" style={{ backgroundImage: `url('${oceanImage}')` }}></div>
           <div className="impact-overlay"></div>
-          ```jsx
           <div className="impact-copy">
-            <p className="eyebrow">FLENZO IMPACT / SOUTH COAST</p>
+            <p className="eyebrow">{home.impact.eyebrow}</p>
 
             <h2>
-              WEAR SOMETHING<br />
-              <em>THAT MEANS MORE.</em>
+              {home.impact.titleLines.map((line, index) => <React.Fragment key={index}>{line}<br /></React.Fragment>)}
+              <em>{home.impact.titleHighlight}</em>
             </h2>
 
-            <p>
-              A Flenzo piece is more than something you put on.
-              It carries the energy of the coast, the people around it,
-              and the moments that bring us together.
-            </p>
+            {home.impact.paragraphs.map((paragraph, index) => <p key={index}>{paragraph}</p>)}
 
-            <p>
-              When you choose Flenzo, you become part of that story.
-              Your support helps us keep creating moments for people to
-              move, play, connect and give back to the places we call home.
-            </p>
-
-            <div className="impact-line">
-              <span>01</span>
-              <strong>MOVE.</strong>
-              <span>Skate. Play. Explore.</span>
-            </div>
-
-            <div className="impact-line">
-              <span>02</span>
-              <strong>CONNECT.</strong>
-              <span>People. Community. Culture.</span>
-            </div>
-
-            <div className="impact-line">
-              <span>03</span>
-              <strong>GIVE BACK.</strong>
-              <span>Our coast. Our home.</span>
-            </div>
+            {home.impact.lines.map((item, index) => (
+              <div className="impact-line" key={index}>
+                <span>{item.number}</span>
+                <strong>{item.word}</strong>
+                <span>{item.text}</span>
+              </div>
+            ))}
 
             <p className="impact-note">
-              The culture is alive because people show up for it.
+              {home.impact.note}
               <br />
-              <strong>Thank you for being part of it.</strong>
+              <strong>{home.impact.noteBold}</strong>
             </p>
           </div>
-          ```
 
         </section>
 
         <section className="newsletter">
           <p className="eyebrow">JOIN THE CULTURE</p>
           <h2>First access to new drops.</h2>
-          <div className="newsletter-form">
-            <input type="email" placeholder="Your email address" aria-label="Email address" />
-            <button type="button">JOIN</button>
-          </div>
+
+          <form className="newsletter-form" onSubmit={handleNewsletterSubscribe}>
+            <input
+              type="email"
+              placeholder="Your email address"
+              aria-label="Email address"
+              autoComplete="email"
+              maxLength={254}
+              required
+              value={newsletterEmail}
+              onChange={(event) => {
+                setNewsletterEmail(event.target.value);
+                if (newsletterStatus) setNewsletterStatus("");
+              }}
+            />
+            <button type="submit" disabled={newsletterSubmitting}>
+              {newsletterSubmitting ? "JOINING..." : "JOIN"}
+            </button>
+          </form>
+
+          <label className="newsletter-consent">
+            <input
+              type="checkbox"
+              checked={newsletterConsent}
+              onChange={(event) => {
+                setNewsletterConsent(event.target.checked);
+                if (newsletterStatus) setNewsletterStatus("");
+              }}
+              required
+            />
+            <span>I agree to receive Flenzo news, new drops and event updates by email.</span>
+          </label>
+
+          <p className="newsletter-status" role="status" aria-live="polite">
+            {newsletterStatus}
+          </p>
+
           <small>No spam. Just drops, events and Flenzo news.</small>
         </section>
       </main>
@@ -721,6 +1112,7 @@ function App() {
           <a href="#community">Community</a>
           <a href="#impact">Impact</a>
           <a href={WHATSAPP_URL} target="_blank" rel="noreferrer">WhatsApp</a>
+          <a href="/admin">Admin Login</a>
         </div>
         <p>© 2026 Flenzo Culture. Built for the culture.</p>
       </footer>
@@ -741,7 +1133,8 @@ function App() {
         <CartDrawer
           cart={cart}
           total={cartTotal}
-          onClose={() => setCartOpen(false)}
+          notice={cartNotice}
+          onClose={() => { setCartOpen(false); setCartNotice(""); }}
           onQty={updateQty}
           onRemove={removeCartItem}
           onCheckout={() => { setCartOpen(false); setCheckoutOpen(true); }}
@@ -792,7 +1185,7 @@ function ProductModal({ product, onClose, onAdd }) {
 
         <div className="modal-gallery">
           <div className="modal-image">
-            <img src={currentImage.src} alt={`${product.name} ${currentImage.label}`} />
+            <SafeImage src={currentImage.src} alt={`${product.name} ${currentImage.label}`} />
           </div>
           {product.images.length > 1 && (
             <div className="image-thumbnails" aria-label="Product photos">
@@ -803,7 +1196,7 @@ function ProductModal({ product, onClose, onAdd }) {
                   onClick={() => setActiveImage(index)}
                   aria-label={`View ${image.label} photo`}
                 >
-                  <img src={image.src} alt="" />
+                  <SafeImage src={image.src} alt="" />
                   <span>{image.label}</span>
                 </button>
               ))}
@@ -814,8 +1207,8 @@ function ProductModal({ product, onClose, onAdd }) {
         <div className="modal-details">
           <p className="eyebrow">FLENZO CULTURE</p>
           <h2>{product.name}</h2>
-          <div className="modal-rating">{product.rating} ★</div>
-          <div className="modal-price"><del>KSH {product.oldPrice.toLocaleString()}</del> KSH {product.price.toLocaleString()}</div>
+          {product.rating != null && <div className="modal-rating">{product.rating} ★</div>}
+          <div className="modal-price">{product.oldPrice != null && <del>KSH {product.oldPrice.toLocaleString()}</del>} KSH {product.price.toLocaleString()}</div>
 
           <label>Color</label>
           <div className="choices">{product.colors.map((value) => <button className={color === value ? "chosen" : ""} key={value} onClick={() => setColor(value)}>{value}</button>)}</div>
@@ -841,11 +1234,12 @@ function ProductModal({ product, onClose, onAdd }) {
   );
 }
 
-function CartDrawer({ cart, total, onClose, onQty, onRemove, onCheckout }) {
+function CartDrawer({ cart, total, notice, onClose, onQty, onRemove, onCheckout }) {
   return (
     <div className="overlay" onClick={onClose}>
       <aside className="cart-drawer" onClick={(event) => event.stopPropagation()}>
         <div className="drawer-head"><h2>Your Cart</h2><button className="icon-btn" onClick={onClose} aria-label="Close cart"><Icon name="x" /></button></div>
+        {notice && <div className="demo-notice" role="status">{notice}</div>}
         {cart.length === 0 ? (
           <div className="empty"><Icon name="bag" size={42} /><h3>Your cart is empty.</h3><p>Add something from the latest Flenzo drop.</p></div>
         ) : (
@@ -853,7 +1247,7 @@ function CartDrawer({ cart, total, onClose, onQty, onRemove, onCheckout }) {
             <div className="cart-items">
               {cart.map((item, index) => (
                 <div className="cart-item" key={`${item.id}-${item.size}-${item.color}-${index}`}>
-                  <img src={item.image} alt={item.name} />
+                  <SafeImage src={item.image} alt={item.name} />
                   <div className="cart-meta">
                     <h4>{item.name}</h4>
                     <small>{item.color} / {item.size}</small>

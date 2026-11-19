@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import {
   describePhotoLimit,
   newPhotoFromFile,
-  storagePublicUrl,
+  resolveImageSrc,
   validateImageFile,
 } from "./lib/productImages.js";
 
@@ -23,7 +23,7 @@ function PhotoTile({ photo, index, disabled, onLabelChange, onRemove }) {
     return () => URL.revokeObjectURL(url);
   }, [file]);
 
-  const imageUrl = photo.kind === "new" ? previewUrl : storagePublicUrl(photo.src);
+  const imageUrl = photo.kind === "new" ? previewUrl : resolveImageSrc(photo.src);
 
   return (
     <li className="admin-photo-tile">

@@ -3,13 +3,23 @@ import { createClient } from "@supabase/supabase-js";
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabasePublishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
-if (!supabaseUrl || !supabasePublishableKey) {
-  throw new Error(
-    "Supabase configuration is missing. Check the local .env.local file."
-  );
+function buildClient() {
+  if (!supabaseUrl || !supabasePublishableKey) {
+    console.error(
+      "Supabase configuration is missing. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY (local .env.local or Netlify environment variables)."
+    );
+    return null;
+  }
+
+  try {
+    return createClient(supabaseUrl, supabasePublishableKey);
+  } catch (error) {
+    console.error("Supabase client could not be created. Check the configured URL and key.", error);
+    return null;
+  }
 }
 
-export const supabase = createClient(
-  supabaseUrl,
-  supabasePublishableKey
-);
+// null when configuration is missing or invalid. Check `supabaseConfigured`
+// before using it so the site can show a friendly message instead of crashing.
+export const supabase = buildClient();
+export const supabaseConfigured = supabase !== null;

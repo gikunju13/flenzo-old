@@ -35,7 +35,26 @@ export function storagePublicUrl(path) {
   if (!filename) return "";
 
   const storagePath = cleaned.startsWith(`${IMAGE_FOLDER}/`) ? cleaned : filename;
+  if (!supabase) return "";
   return supabase.storage.from(IMAGE_BUCKET).getPublicUrl(storagePath).data.publicUrl;
+}
+
+/* One rule set for every stored product image path, used by both the
+   storefront and the admin:
+     - full URLs (http/https, data:image) and paths starting with "/" are
+       used as they are (existing local files such as
+       /flenzo/products/white-tee-front.jpeg)
+     - "flenzo/..." without the leading slash is the same local file
+     - anything else is a Supabase Storage path (products/..., or a bare
+       filename in the bucket root), resolved by storagePublicUrl
+   Returns "" for anything that is not a usable path. */
+export function resolveImageSrc(raw) {
+  if (typeof raw !== "string") return "";
+  const value = raw.trim();
+  if (!value) return "";
+  if (/^(https?:|data:image\/)/i.test(value) || value.startsWith("/")) return value;
+  if (/^flenzo\//i.test(value)) return `/${value}`;
+  return storagePublicUrl(value);
 }
 
 /* Turns a product row into the editable photo list.

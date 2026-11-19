@@ -199,7 +199,10 @@ a {
 }
 
 
-.product-3 img {
+/* The crop follows the photo itself (a fixed file in /public), so it still applies when
+   the product comes from the database with its own id. */
+.product-3 img,
+.product-image-wrap img[src$="/flenzo/products/black-tee-front.jpeg"] {
   object-position: center 35%;
 }
 
@@ -682,7 +685,8 @@ a {
   letter-spacing: .8px
 }
 
-.community-image.skate-ocean img {
+.community-image.skate-ocean img,
+.community-image img[src$="/flenzo/community/skateForTheOcean.jpeg"] {
   object-position: center 5%;
 }
 
@@ -941,6 +945,39 @@ a {
   display: block;
   color: #888;
   margin-top: 15px
+}
+
+.newsletter-form button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed
+}
+
+.newsletter-consent {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 9px;
+  max-width: 520px;
+  margin: 16px auto 0;
+  color: #666;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer
+}
+
+.newsletter-consent input {
+  flex: 0 0 auto;
+  margin: 2px 0 0;
+  accent-color: #111
+}
+
+.newsletter-status {
+  min-height: 18px;
+  margin: 12px auto 0;
+  color: #333;
+  font-size: 13px;
+  line-height: 1.5
 }
 
 footer {
@@ -1334,6 +1371,14 @@ footer p {
 
 .empty h3 {
   color: #111
+}
+
+.story-empty {
+  padding: 40px 20px
+}
+
+.store-unavailable {
+  padding: 56px 20px
 }
 
 /* CHECKOUT */
